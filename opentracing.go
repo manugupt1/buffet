@@ -18,34 +18,34 @@ func OpenTracing(tr opentracing.Tracer) buffalo.MiddlewareFunc {
 	tracer = tr
 	return func(next buffalo.Handler) buffalo.Handler {
 		return func(c buffalo.Context) error {
-
 			opName := op(c)
 
-			wireContext, _ := tr.Extract(
+			wireContext, err := tr.Extract(
 				opentracing.HTTPHeaders,
 				opentracing.HTTPHeadersCarrier(c.Request().Header))
 
+			var sp opentracing.Span
+			defer sp.Finish()
 			// Create the span referring to the RPC client if available.
 			// If wireContext == nil, a root span will be created.
-			sp := tr.StartSpan(
-				opName,
-				ext.RPCServerOption(wireContext))
+			if err == nil {
+				sp = tr.StartSpan(
+					opName,
+					ext.RPCServerOption(wireContext))
+			} else {
+				sp = tr.StartSpan(opName)
+			}
 
-			ext.HTTPMethod.Set(sp, c.Request().Method)
-			ext.HTTPUrl.Set(sp, c.Request().URL.String())
-
+			setTraceRequestOptions(&sp, c)
+			// Setting span to the context is useful when SpanFromContext tries to create a new context
 			ext.Component.Set(sp, "buffalo")
 			c.Set("otspan", sp)
-			err := next(c)
+
+			err = next(c)
 			if err != nil {
 				ext.Error.Set(sp, true)
 				sp.LogFields(olog.Error(err))
 			}
-			br, ok := c.Response().(*buffalo.Response)
-			if ok {
-				ext.HTTPStatusCode.Set(sp, uint16(br.Status))
-			}
-			sp.Finish()
 			return err
 		}
 	}
@@ -68,9 +68,7 @@ func SpanFromContext(c buffalo.Context) opentracing.Span {
 	// none exists, make a new one (sadface)
 	opName := op(c)
 	span := tracer.StartSpan(opName)
-	ext.HTTPMethod.Set(span, c.Request().Method)
-	ext.HTTPUrl.Set(span, c.Request().URL.String())
-	ext.Component.Set(span, "buffalo")
+	setTraceRequestOptions(&span, c)
 	return span
 
 }
@@ -84,11 +82,12 @@ func ChildSpan(opname string, c buffalo.Context) opentracing.Span {
 	return sp
 }
 
+func operation(s string) string {
+	chunks := strings.Split(s, ".")
+	return chunks[len(chunks)-1]
+}
+
 func op(c buffalo.Context) (opName string) {
-	var operation = func(s string) string {
-		chunks := strings.Split(s, ".")
-		return chunks[len(chunks)-1]
-	}
 	opName = "HTTP " + c.Request().Method + c.Request().URL.Path
 	rt := c.Value("current_route")
 	if rt != nil {
@@ -98,4 +97,17 @@ func op(c buffalo.Context) (opName string) {
 		}
 	}
 	return
+}
+
+func setTraceRequestOptions(sp *opentracing.Span, c buffalo.Context) {
+	ext.HTTPMethod.Set(*sp, c.Request().Method)
+	ext.HTTPUrl.Set(*sp, c.Request().URL.String())
+	ext.Component.Set(*sp, "buffalo")
+}
+
+func setTraceResponseOptions(sp *opentracing.Span, c buffalo.Context) {
+	br, ok := c.Response().(*buffalo.Response)
+	if ok {
+		ext.HTTPStatusCode.Set(*sp, uint16(br.Status))
+	}
 }
