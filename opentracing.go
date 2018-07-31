@@ -80,7 +80,10 @@ func OpenTracingFromParentContext(parent context.Context, values map[string]inte
 
 			// Attach values to the parent tag
 			for k, v := range values {
-				parentSp.SetTag(k, v)
+				if parent.Value(v) != nil {
+					parentSp.SetTag(k, v)
+				}
+				parentSp.LogEventWithPayload(k, v)
 			}
 
 			tr.StartSpan(opName, opentracing.ChildOf(parentSp.Context()))
