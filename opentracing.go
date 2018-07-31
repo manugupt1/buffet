@@ -1,6 +1,7 @@
 package buffet
 
 import (
+	"context"
 	"strings"
 
 	"github.com/gobuffalo/buffalo"
@@ -46,6 +47,56 @@ func OpenTracing(tr opentracing.Tracer) buffalo.MiddlewareFunc {
 				ext.Error.Set(sp, true)
 				sp.LogFields(olog.Error(err))
 			}
+			return err
+		}
+	}
+}
+
+// OpenTracingFromParentContext is a buffalo middleware that adds the necessary
+// components to the request to make it traced through OpenTracing.
+// Initialize it by passing in an opentracing.Tracer.
+func OpenTracingFromParentContext(parent context.Context, values map[string]interface{}, tr opentracing.Tracer) buffalo.MiddlewareFunc {
+	tracer = tr
+	return func(next buffalo.Handler) buffalo.Handler {
+		return func(c buffalo.Context) error {
+			opName := op(c)
+
+			wireSp, err := tr.Extract(
+				opentracing.HTTPHeaders,
+				opentracing.HTTPHeadersCarrier(c.Request().Header))
+
+			var parentSp opentracing.Span
+			var buffaloSp opentracing.Span
+			// Create the span referring to the RPC client if available.
+			// If wireSp == nil, a root span will be created.
+			if err == nil {
+				parentSp = tr.StartSpan(
+					"parent",
+					opentracing.ChildOf(wireSp))
+
+			} else {
+				parentSp = tr.StartSpan("root")
+			}
+
+			// Attach values to the parent tag
+			for k, v := range values {
+				parentSp.SetTag(k, v)
+			}
+
+			tr.StartSpan(opName, opentracing.ChildOf(parentSp.Context()))
+			setTraceRequestOptions(&buffaloSp, c)
+			// Setting span to the context is useful when SpanFromContext tries to create a new context
+			ext.Component.Set(buffaloSp, "buffalo")
+			c.Set("otspan", buffaloSp)
+
+			err = next(c)
+			if err != nil {
+				ext.Error.Set(buffaloSp, true)
+				buffaloSp.LogFields(olog.Error(err))
+			}
+
+			defer buffaloSp.Finish()
+			defer parentSp.Finish()
 			return err
 		}
 	}
